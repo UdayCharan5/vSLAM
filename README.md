@@ -62,6 +62,13 @@ sudo apt install -y build-essential cmake git wget curl pkg-config \
     libssl-dev python3-pip python3-dev software-properties-common
 ```
 
+```bash
+nvidia-smi
+# Should show: Driver Version: 575.xx  |  CUDA Version: 12.8
+# GPU: NVIDIA GeForce RTX 5060
+If it did not show recommended GPU, go to #2.2
+```
+
 ### 2.2 Install NVIDIA driver 575+ (Blackwell requirement)
 
 Ubuntu 24.04's default driver repo may ship an older version. Use the graphics-drivers PPA:
