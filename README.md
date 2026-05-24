@@ -1,6 +1,3 @@
-# vSLAM
-vSLAM_using_ZED_2i
-
 # ZED 2i vSLAM — Full Installation & Run Guide
 **Ubuntu 24.04 LTS | RTX 5060 (Blackwell) | CUDA 12.8+ | ROS 2 Jazzy**
 
@@ -50,6 +47,8 @@ vSLAM_using_ZED_2i
 | USB           | USB 3.1 Gen 2 Type-C                     |
 | RAM           | 16 GB min, 32 GB recommended             |
 
+> **Note on `nvidia-smi` CUDA version:** `nvidia-smi` shows the **maximum** CUDA version your driver supports, not what is installed as a toolkit. If your `nvidia-smi` shows `CUDA Version: 13.2`, that is fine — it means your driver (595+) supports up to CUDA 13.2. You still install **CUDA Toolkit 12.8** as the compiler, because ZED SDK and Open3D target CUDA 12.x.
+
 ---
 
 ## 2. OS and NVIDIA Driver Setup
@@ -60,13 +59,6 @@ vSLAM_using_ZED_2i
 sudo apt update && sudo apt full-upgrade -y
 sudo apt install -y build-essential cmake git wget curl pkg-config \
     libssl-dev python3-pip python3-dev software-properties-common
-```
-
-```bash
-nvidia-smi
-# Should show: Driver Version: 575.xx  |  CUDA Version: 12.8
-# GPU: NVIDIA GeForce RTX 5060
-If it did not show recommended GPU, go to #2.2
 ```
 
 ### 2.2 Install NVIDIA driver 575+ (Blackwell requirement)
@@ -84,7 +76,7 @@ After reboot, verify:
 
 ```bash
 nvidia-smi
-# Should show: Driver Version: 575.xx  |  CUDA Version: 12.8
+# Should show: Driver Version: 575.xx or higher
 # GPU: NVIDIA GeForce RTX 5060
 ```
 
@@ -138,6 +130,7 @@ nvcc --version
 If nvcc is not found after this:
 
 ```bash
+# The symlink /usr/local/cuda may not exist — create it:
 sudo ln -sf /usr/local/cuda-12.8 /usr/local/cuda
 export PATH=/usr/local/cuda/bin:$PATH
 ```
@@ -151,13 +144,34 @@ export PATH=/usr/local/cuda/bin:$PATH
 Visit [stereolabs.com/developers/release](https://www.stereolabs.com/developers/release/) and grab the latest ZED SDK 4.x for Ubuntu 24 + CUDA 12. Example for SDK 4.2:
 
 ```bash
+cd ~
 wget "https://download.stereolabs.com/zedsdk/4.2/cu12/ubuntu24" \
     -O ZED_SDK_Ubuntu24_cuda12_v4.2.run
 chmod +x ZED_SDK_Ubuntu24_cuda12_v4.2.run
-sudo ./ZED_SDK_Ubuntu24_cuda12_v4.2.run
 ```
 
-During installation: accept the EULA, accept tools (ZED_Diagnostic, ZED_Explorer), accept the Python API.
+> ⚠️ **Do NOT run with sudo.** The installer asks for your password itself when needed. Running as root causes it to abort with:
+> `"This script shouldn't be run as root"`
+
+> ⚠️ **Always use `./` prefix.** Running just `ZED_SDK_Ubuntu24_cuda12_v4.2.run` gives "command not found". You must use:
+
+```bash
+./ZED_SDK_Ubuntu24_cuda12_v4.2.run
+```
+
+Walk through the prompts:
+- **Accept** the EULA
+- **Yes** to installing dependencies
+- **Yes** to tools (ZED_Diagnostic, ZED_Explorer, ZED_Depth_Viewer)
+- **Yes** to Python API
+- **Yes** to CUDA samples (optional)
+
+After ~5 minutes, verify it installed:
+
+```bash
+ls /usr/local/zed/tools/
+# Should list: ZED_Diagnostic  ZED_Explorer  ZED_Depth_Viewer  etc.
+```
 
 ### 4.2 Verify the camera
 
@@ -314,6 +328,18 @@ sudo apt install -y \
     liblz4-dev libzstd-dev
 ```
 
+**Also install libc++ and clang** — required by Open3D's Filament renderer:
+
+```bash
+sudo apt install -y libc++-dev libc++abi-dev clang glslang-tools
+```
+
+> These are non-obvious dependencies. Without `libc++-dev libc++abi-dev`, cmake fails with:
+> `Could not find CPP_LIBRARY using the following names: c++`
+>
+> Without `glslang-tools`, cmake fails with:
+> `Could not find OPEN3D_GLSLANG_VALIDATOR using the following names: glslangValidator`
+
 ### 7.2 Clone (main branch for Blackwell)
 
 ```bash
@@ -334,28 +360,76 @@ cmake .. \
   -DBUILD_EXAMPLES=OFF \
   -DBUILD_UNIT_TESTS=OFF \
   -DCMAKE_INSTALL_PREFIX=/usr/local \
-  -DGLIBCXX_USE_CXX11_ABI=ON
+  -DGLIBCXX_USE_CXX11_ABI=ON \
+  -DCLANG_LIBDIR=/usr/lib/llvm-18/lib \
+  -DCMAKE_CXX_FLAGS="-Wno-maybe-uninitialized" \
+  -DCMAKE_C_FLAGS="-Wno-maybe-uninitialized"
 ```
 
-### 7.4 Build and install (~75 minutes)
+> **`-DCLANG_LIBDIR=/usr/lib/llvm-18/lib`** — explicitly tells cmake where LLVM 18 is. Without this it may fail to find libc++ even after installing it.
+>
+> **`-Wno-maybe-uninitialized`** — suppresses a GCC 13 false-positive warning on Eigen SIMD code that would otherwise abort the build with:
+> `error: 'best_R...' may be used uninitialized [-Werror=maybe-uninitialized]`
+> This is a known GCC 13 + Eigen issue, not a real bug.
+
+Verify cmake succeeded — it should print `-- Configuring done` with no errors. Confirm clang was found:
+
+```bash
+# Should see this line in cmake output:
+# -- CLANG_LIBDIR found in ubuntu-default: /usr/lib/llvm-18/lib
+# -- Filament C++ libraries: /usr/lib/llvm-18/lib/libc++.so.1 ...
+```
+
+> **Warning you will see but can ignore:**
+> `libc++ (LLVM) version 18 > 11 includes libunwind that interferes with system libunwind.so.8`
+> This is a cmake warning, not an error. The build proceeds fine.
+
+### 7.4 Build (~75 minutes)
 
 ```bash
 make -j$(nproc)
+```
+
+This takes a long time due to CUDA kernel compilation for sm_120 (Blackwell). Normal output looks like:
+```
+[ 84%] Building CUDA object .../core_impl.dir/nns/FixedRadiusSearchOps.cu.o
+[ 86%] Built target core
+[100%] Built target pybind
+```
+
+### 7.5 Install
+
+```bash
 sudo make install
 sudo ldconfig
 ```
 
-### 7.5 Install Python bindings
+### 7.6 Install Python bindings
+
+Ubuntu 24.04 blocks system-wide pip installs. The wheel file is not automatically created by `make install`. Build and install it manually:
 
 ```bash
-sudo make python-package
-pip3 install lib/python_package/pip_package/open3d-*.whl
+cd ~/Open3D/build/lib/python_package
+
+# The directory is owned by root after sudo make install, so use sudo here
+sudo python3 setup.py bdist_wheel
+
+# Install the wheel that was just created
+pip3 install $(find . -name "*.whl") --break-system-packages
 ```
 
-### 7.6 Verify CUDA
+If `setup.py` gives a permissions error even with sudo, use pip directly on the package directory:
+
+```bash
+cd ~/Open3D/build/lib/python_package
+sudo pip3 install . --break-system-packages
+```
+
+### 7.7 Verify CUDA
 
 ```bash
 python3 -c "import open3d; print(open3d.__version__); print('CUDA:', open3d.core.cuda.is_available())"
+# 0.19.0
 # CUDA: True
 ```
 
@@ -392,14 +466,34 @@ cd ~/ros2_ws/src/zed_rviz
 
 ```
 ~/ros2_ws/src/zed_rviz/
-├── CMakeLists.txt          ← your existing file
+├── CMakeLists.txt          ← your existing file (with one line removed — see 9.3)
 ├── package.xml             ← create this (content below)
 └── src/
     ├── zed_rviz.cpp
     └── zed_slam_map.cpp
 ```
 
-### 9.3 Create package.xml
+### 9.3 Fix CMakeLists.txt — remove unsupported policy
+
+Open the file:
+
+```bash
+nano ~/ros2_ws/src/zed_rviz/CMakeLists.txt
+```
+
+Find and **delete** this line (around line 9):
+
+```cmake
+cmake_policy(SET CMP0167 OLD)   # FindBoost module
+```
+
+Save and exit: `Ctrl+X` → `Y` → `Enter`
+
+> This line causes a hard error on Ubuntu 24.04's CMake version:
+> `CMake Error: Policy "CMP0167" is not known to this version of CMake.`
+> CMake 3.28 (shipped with Ubuntu 24.04) does not know CMP0167 — it was introduced in CMake 3.30. Removing the line is safe; FindBoost works fine without it.
+
+### 9.4 Create package.xml
 
 ```xml
 <?xml version="1.0"?>
@@ -427,7 +521,7 @@ cd ~/ros2_ws/src/zed_rviz
 </package>
 ```
 
-### 9.4 Build
+### 9.5 Build
 
 ```bash
 cd ~/ros2_ws
@@ -441,7 +535,11 @@ colcon build \
     --parallel-workers $(nproc)
 ```
 
-### 9.5 Source the workspace
+> **Warnings you will see but can ignore:**
+> - `CMake Deprecation Warning: CMP0072 OLD behavior` — comes from Open3D's cmake config, harmless
+> - `WARNING: io features related to pcap will be disabled` — PCL pcap support not needed, harmless
+
+### 9.6 Source the workspace
 
 ```bash
 source ~/ros2_ws/install/setup.bash
@@ -471,7 +569,7 @@ Shows a real-time 3D mesh of only the current frame. Good for verifying depth qu
 ros2 run zed_rviz zed_rviz
 ```
 
-A GLFW window opens with the live mesh. Three OpenCV windows show `Rectified Left`, `Disparity (WLS)`, and `Depth colour`.
+A GLFW window opens with the live mesh. OpenCV windows show `ZED Left` and `ZED Depth`.
 
 Controls: Left drag = orbit | Scroll = zoom
 
@@ -481,13 +579,13 @@ Published topics:
 
 ### 10.2 zed_slam_map — accumulative vSLAM mapper
 
-Builds a growing global 3D map as you move the camera. TSDF fusion runs on the RTX 5060.
+Builds a growing global 3D map as you move the camera. Uses ZED SDK depth directly (same as ZEDfu). TSDF fusion runs on CPU.
 
 ```bash
 ros2 run zed_rviz zed_slam_map
 ```
 
-The GLFW window shows the map growing. A yellow-orange line traces the camera path.
+The GLFW window shows the map growing upright (floor at bottom, ceiling at top). A green-to-orange line traces the camera path.
 
 Controls:
 - Left drag → orbit
@@ -495,13 +593,14 @@ Controls:
 - W / S → pan forward / back
 - A / D → pan left / right
 - Q / E → pan up / down
+- R → reset view
 
 Published topics:
 - `/zed/point_cloud` — sensor_msgs/PointCloud2
 - `/zed/odom` — nav_msgs/Odometry
 - `/zed/pose` — geometry_msgs/PoseStamped
 
-Press **Ctrl+C** to stop. The node saves `final_map.ply`, `final_map_mesh.ply`, and `final_map.csv` before exiting.
+Press **Ctrl+C** to stop. The node saves `final_map.ply`, `final_mesh.ply`, and `final_map.csv` before exiting.
 
 ### 10.3 Viewing in RViz2 (optional)
 
@@ -511,9 +610,8 @@ ros2 run rviz2 rviz2
 ```
 
 In RViz2:
-- Fixed Frame → `zed_left_camera`
+- Fixed Frame → `map`
 - Add → PointCloud2 → `/zed/point_cloud`
-- Add → Marker → `/zed/mesh_marker` (zed_rviz)
 - Add → PoseStamped → `/zed/pose` (zed_slam_map)
 
 ---
@@ -526,23 +624,15 @@ All constants are at the top of each `.cpp` under the `TUNE` section.
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
-| `VOXEL_SIZE` | `0.04f` (4 cm) | Decrease to `0.02` for finer indoor maps |
-| `TSDF_TRUNC` | `0.16f` | Keep at 4× VOXEL_SIZE |
-| `BLOCK_COUNT` | `40000` (~300 MB VRAM) | RTX 5060 has 8 GB — safe to raise to `100000` |
-| `KEYFRAME_EVERY` | `3` | Integrate every N frames |
-| `EXTRACT_EVERY` | `1` | Re-mesh every N keyframes; raise to `5` to reduce load |
+| `VOXEL_SIZE` | `0.04f` (4 cm) | Decrease to `0.03` for finer indoor maps |
+| `TSDF_TRUNC` | `0.12f` | Keep at 3× VOXEL_SIZE |
+| `BLOCK_COUNT` | `100000` (~750 MB RAM) | Safe on RTX 5060 8 GB |
+| `KF_DIST_M` | `0.08f` | New keyframe every 8 cm of movement |
+| `KF_ANGLE_DEG` | `5.0f` | Or every 5° rotation |
+| `EXTRACT_EVERY` | `3` | Re-mesh every N keyframes; raise to `5` to reduce CPU load |
 | `DEPTH_MIN` | `0.3f` | Min depth (metres) |
 | `DEPTH_MAX` | `8.0f` | Max depth (metres) |
-| `PC_STEP` | `3` | Point cloud publish downsample |
-
-Suggested aggressive settings for the RTX 5060 8 GB:
-
-```cpp
-static constexpr float VOXEL_SIZE     = 0.03f;   // 3 cm — finer
-static constexpr float TSDF_TRUNC     = 0.12f;   // 4× voxel
-static constexpr int   BLOCK_COUNT    = 100000;  // ~750 MB VRAM, fine on 8 GB
-static constexpr int   KEYFRAME_EVERY = 2;       // denser fusion
-```
+| `PC_STEP` | `4` | Point cloud publish downsample |
 
 ### Camera resolution
 
@@ -557,13 +647,10 @@ ip.camera_fps        = 30;
 
 ## 12. Output Files
 
-### zed_rviz
-- `pointcloud_frame_N.csv` — saved every 10 frames. Columns: `X,Y,Z,R,G,B`
-
 ### zed_slam_map (saved on Ctrl+C shutdown)
 - `final_map.ply` — coloured point cloud
-- `final_map_mesh.ply` — triangle mesh
-- `final_map.csv` — columns: `X,Y,Z,R_255,G_255,B_255,R_f,G_f,B_f`
+- `final_mesh.ply` — triangle mesh
+- `final_map.csv` — columns: `X,Y,Z,R,G,B`
 
 ### Opening final_map.csv in CloudCompare
 1. File → Open → `final_map.csv`
@@ -574,6 +661,133 @@ ip.camera_fps        = 30;
 
 ## 13. Troubleshooting
 
+This section lists every real error encountered during setup, with the exact fix.
+
+---
+
+### ZED SDK: "This script shouldn't be run as root"
+
+**Error:** Running `sudo ./ZED_SDK_Ubuntu24_cuda12_v4.2.run` aborts immediately.
+
+**Fix:** Remove `sudo`. The installer requests root itself when needed:
+```bash
+./ZED_SDK_Ubuntu24_cuda12_v4.2.run
+```
+
+---
+
+### ZED SDK: "command not found"
+
+**Error:** Running `ZED_SDK_Ubuntu24_cuda12_v4.2.run` gives "command not found".
+
+**Fix:** Always prefix with `./` and ensure you are in the directory containing the file:
+```bash
+cd ~
+ls *.run   # confirm file is here
+./ZED_SDK_Ubuntu24_cuda12_v4.2.run
+```
+
+---
+
+### Open3D cmake: "Could not find CPP_LIBRARY using the following names: c++"
+
+**Error:**
+```
+CMake Error at 3rdparty/find_dependencies.cmake:1424 (find_library):
+  Could not find CPP_LIBRARY using the following names: c++
+```
+
+**Fix:** Install LLVM's libc++ and clang:
+```bash
+sudo apt install -y libc++-dev libc++abi-dev clang
+```
+Then re-run cmake. You do not need to `rm -rf *` the build directory.
+
+---
+
+### Open3D cmake: "Could not find OPEN3D_GLSLANG_VALIDATOR"
+
+**Error:**
+```
+CMake Error at cmake/Open3DAddComputeShaders.cmake:39 (find_program):
+  Could not find OPEN3D_GLSLANG_VALIDATOR using the following names: glslangValidator
+```
+
+**Fix:** Install glslang tools (needed for Filament's Vulkan shader compilation):
+```bash
+sudo apt install -y glslang-tools
+which glslangValidator   # should print /usr/bin/glslangValidator
+```
+Then re-run cmake.
+
+---
+
+### Open3D build: "may be used uninitialized [-Werror=maybe-uninitialized]"
+
+**Error:**
+```
+error: 'best_R.Eigen::Matrix...' may be used uninitialized [-Werror=maybe-uninitialized]
+make[2]: *** [.../MinimumOBE.cpp.o] Error 1
+```
+
+**Fix:** This is a GCC 13 false-positive on Eigen SIMD intrinsics — not a real bug. Add `-Wno-maybe-uninitialized` to the cmake flags:
+```bash
+cmake .. \
+  ... (all other flags) ... \
+  -DCMAKE_CXX_FLAGS="-Wno-maybe-uninitialized" \
+  -DCMAKE_C_FLAGS="-Wno-maybe-uninitialized"
+
+make -j$(nproc)
+```
+
+---
+
+### Open3D Python install: "externally-managed-environment" / pip glob fails
+
+**Error:**
+```
+pip3 install lib/python_package/pip_package/open3d-*.whl --break-system-packages
+ERROR: open3d-*.whl is not a valid wheel filename.
+```
+
+**Cause 1:** The shell glob `*.whl` did not expand because the wheel was not built yet.
+
+**Cause 2:** `sudo make install` made the directory root-owned, so `python3 setup.py bdist_wheel` fails with "Permission denied".
+
+**Fix:**
+```bash
+cd ~/Open3D/build/lib/python_package
+sudo python3 setup.py bdist_wheel
+pip3 install $(find . -name "*.whl") --break-system-packages
+```
+
+If `setup.py` still fails, skip it and install directly:
+```bash
+cd ~/Open3D/build/lib/python_package
+sudo pip3 install . --break-system-packages
+```
+
+---
+
+### colcon build: "Policy CMP0167 is not known to this version of CMake"
+
+**Error:**
+```
+CMake Error at CMakeLists.txt:9 (cmake_policy):
+  Policy "CMP0167" is not known to this version of CMake.
+```
+
+**Fix:** Remove the offending line from `CMakeLists.txt`. CMP0167 was introduced in CMake 3.30 but Ubuntu 24.04 ships CMake 3.28:
+```bash
+nano ~/ros2_ws/src/zed_rviz/CMakeLists.txt
+# Delete this line:
+#   cmake_policy(SET CMP0167 OLD)   # FindBoost module
+# Save: Ctrl+X → Y → Enter
+```
+Then rebuild.
+
+---
+
 ### nvidia-smi shows old driver or RTX 5060 not recognised
 
 ```bash
@@ -583,14 +797,18 @@ sudo apt update && sudo apt install -y nvidia-driver-575
 sudo reboot
 ```
 
+---
+
 ### nvcc not found after CUDA install
 
 ```bash
 ls /usr/local/ | grep cuda
-# Create the symlink if only cuda-12.8 exists:
+# If only cuda-12.8 exists but no cuda symlink:
 sudo ln -sf /usr/local/cuda-12.8 /usr/local/cuda
 export PATH=/usr/local/cuda/bin:$PATH
 ```
+
+---
 
 ### ZED SDK installer says CUDA version mismatch
 
@@ -599,8 +817,10 @@ export PATH=/usr/local/cuda/bin:$PATH
 nvcc --version
 export CUDA_HOME=/usr/local/cuda-12.8
 export PATH=$CUDA_HOME/bin:$PATH
-sudo ./ZED_SDK_Ubuntu24_cuda12_v4.2.run
+./ZED_SDK_Ubuntu24_cuda12_v4.2.run
 ```
+
+---
 
 ### OpenCV ximgproc not found (build error or import error)
 
@@ -611,28 +831,18 @@ sudo apt remove python3-opencv libopencv-dev -y
 # Redo Section 6
 ```
 
+---
+
 ### Open3D CUDA not available
 
 ```bash
 python3 -c "import open3d; print(open3d.core.cuda.is_available())"
 # False means pip wheel was used — it has no sm_120
 pip3 uninstall open3d -y
-# Redo Section 7 (source build)
+# Redo Section 7 (source build with -DCUDA_ARCH="12.0")
 ```
 
-### TSDF node prints "CUDA TSDF unavailable — CPU fallback"
-
-Open3D's CUDA device init failed. Test directly:
-
-```bash
-python3 -c "
-import open3d as o3d
-dev = o3d.core.Device('CUDA:0')
-print('OK:', dev)
-"
-```
-
-If it throws, your Open3D build didn't compile sm_120 kernels. Rebuild with `-DCUDA_ARCH="12.0"`.
+---
 
 ### GLFW window fails to open
 
@@ -641,6 +851,8 @@ sudo apt install -y libglfw3 libglew2.2 mesa-utils
 glxinfo | grep "OpenGL version"
 # On headless / SSH: export DISPLAY=:0
 ```
+
+---
 
 ### ROS 2 "package not found" after build
 
@@ -653,18 +865,22 @@ source install/setup.bash
 ros2 run zed_rviz zed_slam_map
 ```
 
+---
+
 ### Tracking lost / map drifts badly
 
 - Move the camera slowly and smoothly — fast motion breaks visual odometry
 - Good lighting and a textured environment are required (blank walls cause failure)
-- The node sets `enable_imu_fusion=true` and `enable_area_memory=true` already
+- The node sets `enable_imu_fusion=true` and `enable_area_memory=true` by default
 - If tracking is lost, restart the node — there is no in-code recovery
 
-### Out of VRAM (very unlikely on 8 GB RTX 5060)
+---
+
+### Out of RAM during TSDF (very unlikely on 8 GB RTX 5060)
 
 ```cpp
 // In zed_slam_map.cpp, reduce:
-static constexpr int BLOCK_COUNT = 20000;  // drops to ~150 MB VRAM
+static constexpr int BLOCK_COUNT = 50000;  // drops to ~375 MB RAM
 ```
 
 ---
@@ -673,17 +889,19 @@ static constexpr int BLOCK_COUNT = 20000;  // drops to ~150 MB VRAM
 
 ```
 1.  Ubuntu 24.04 LTS
-2.  NVIDIA driver 575+        →  ppa:graphics-drivers/ppa
-3.  CUDA Toolkit 12.8         →  cuda.nvidia.com repo for ubuntu2404
-4.  ZED SDK 4.x               →  Ubuntu 24 / CUDA 12 build from stereolabs.com
-5.  ROS 2 Jazzy               →  apt, ros2.list for noble
-6.  OpenCV 4.10 from source   →  CUDA_ARCH_BIN="12.0", with contrib
-7.  Open3D from source        →  main branch, CUDA_ARCH="12.0"
-8.  Eigen3 / GLFW / GLEW / PCL  →  apt
-9.  Create ~/ros2_ws, write package.xml, copy source files
-10. colcon build              →  source jazzy first
-11. source install/setup.bash
-12. ros2 run zed_rviz zed_slam_map
+2.  NVIDIA driver 575+           →  ppa:graphics-drivers/ppa
+3.  CUDA Toolkit 12.8            →  cuda.nvidia.com repo for ubuntu2404
+4.  ZED SDK 4.x                  →  ./ZED_SDK_Ubuntu24_cuda12_v4.2.run  (no sudo)
+5.  ROS 2 Jazzy                  →  apt, ros2.list for noble
+6.  OpenCV 4.10 from source      →  CUDA_ARCH_BIN="12.0", with contrib
+7.  libc++ + clang + glslang     →  sudo apt install libc++-dev libc++abi-dev clang glslang-tools
+8.  Open3D from source           →  main branch, CUDA_ARCH="12.0", -Wno-maybe-uninitialized
+9.  Eigen3 / GLFW / GLEW / PCL  →  apt
+10. Create ~/ros2_ws, write package.xml, copy source files
+11. Remove CMP0167 line from CMakeLists.txt
+12. colcon build                 →  source jazzy first
+13. source install/setup.bash
+14. ros2 run zed_rviz zed_slam_map
 ```
 
 Estimated build times on a modern system:
